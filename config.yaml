@@ -12,8 +12,8 @@ smartapi:
   enable: true             # true = use SmartAPI for live data, false = SimulatedFeed
   api_key: "9Ckbu4SY"
   client_id: "V54420165"
-  password: "Gugan_2001"
-  totp: "a09f9deb-5edc-48db-b442-df25e507f142"        # or the OTP/2FA mechanism required by Angel
+  password: "1971"
+  totp: "130644"        # or the OTP/2FA mechanism required by Angel
   exchange: "NSE"
   tradingsymbol: "NIFTY 50"  # check exact SmartAPI symbol name in Angel master list
   symboltoken: "99926000"        # numeric token for Nifty from Angel master list

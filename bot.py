@@ -79,7 +79,7 @@ def main():
     trader = PaperTrader(starting_cash=starting, slippage=slippage)
     strategy = {s: FiveEMA(ema_period=5, rr=1.5) for s in symbols}
 
-    # Choose feed: SmartAPI (live NIFTY LTP) or Simulated
+    # Choose feed: SmartAPI (live) or Simulated
     sa_cfg = cfg.get("smartapi", {})
     use_smartapi = sa_cfg.get("enable", False)
 
@@ -110,6 +110,15 @@ def main():
     market_prices = {s: None for s in symbols}
 
     candle_builder = CandleBuilder(bar_seconds=300)  # 5 minutes
+
+    # SEND START MESSAGE
+    if notifier:
+        start_msg = (
+            "BOT STARTED ✅\n"
+            f"Mode: {mode}\n"
+            f"Symbols: {', '.join(symbols)}"
+        )
+        notifier.send(start_msg)
 
     try:
         while True:
@@ -158,10 +167,27 @@ def main():
                 f"total={pnl['total']:.2f}"
             )
             time.sleep(interval)
+
     except KeyboardInterrupt:
         print("Stopped by user. Trades:")
         for t in trader.trade_log:
             print(t)
+        # END MESSAGE on clean stop
+        if notifier:
+            notifier.send("BOT STOPPED ⛔ (KeyboardInterrupt)")
+
+    except Exception as e:
+        # Log the error
+        print(f"BOT ERROR: {e}")
+        # END MESSAGE on unexpected error
+        if notifier:
+            notifier.send(f"BOT STOPPED ⛔ due to ERROR:\n{e}")
+        raise
+
+    else:
+        # Loop exited without exception (rare)
+        if notifier:
+            notifier.send("BOT STOPPED ⛔ (loop ended normally)")
 
 
 if __name__ == "__main__":

@@ -1,8 +1,15 @@
 import time
+import yaml
 
 from strategy import FiveEMA
 from paper_trader import PaperTrader
 from data_feed import SimulatedFeed
+from telegram_notifier import TelegramNotifier
+
+
+def load_config(path="config.yaml"):
+    with open(path, "r") as f:
+        return yaml.safe_load(f)
 
 
 def smoke_run(iterations=50, bar_seconds=5):
@@ -11,7 +18,19 @@ def smoke_run(iterations=50, bar_seconds=5):
 
     - Uses a very short 'bar_seconds' so you don't wait 5 real minutes per bar.
     - Builds mini-candles and feeds them into FiveEMA.update_candle.
+    - Sends TEST trade messages to Telegram if enabled.
     """
+
+    cfg = load_config("config.yaml")
+    tg_cfg = cfg.get("telegram", {})
+    use_telegram = tg_cfg.get("enable", False)
+
+    notifier = None
+    if use_telegram:
+        notifier = TelegramNotifier(
+            bot_token=tg_cfg.get("bot_token"),
+            chat_id=tg_cfg.get("chat_id"),
+        )
 
     feed = SimulatedFeed(start_price=100.0, volatility=0.5)
     trader = PaperTrader(starting_cash=10000, slippage=0.0)
@@ -57,10 +76,29 @@ def smoke_run(iterations=50, bar_seconds=5):
 
             if sig and sig["signal"] == "short_entry":
                 ok, res = trader.sell_market("TEST", 1, sig["entry"])
+                msg = (
+                    "TEST: SHORT entry\n"
+                    f"Symbol: TEST\n"
+                    f"Qty: 1\n"
+                    f"Entry: {sig['entry']:.2f}\n"
+                    f"SL: {sig['sl']:.2f}\n"
+                    f"TP: {sig['tp']:.2f}"
+                )
                 print("  SHORT executed:", ok, res)
+                if notifier and ok:
+                    notifier.send(msg)
+
             elif sig and sig["signal"] in ("exit_sl", "exit_tp"):
                 ok, res = trader.buy_market("TEST", 1, sig["exit_price"])
+                msg = (
+                    "TEST: EXIT " + sig["signal"] + "\n"
+                    f"Symbol: TEST\n"
+                    f"Qty: 1\n"
+                    f"Price: {sig['exit_price']:.2f}"
+                )
                 print("  EXIT executed:", ok, res)
+                if notifier and ok:
+                    notifier.send(msg)
 
         time.sleep(0.2)
 

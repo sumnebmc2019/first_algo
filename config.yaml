@@ -2,6 +2,7 @@ mode: paper          # keep 'paper' so ONLY PaperTrader is used
 
 symbols:
   - NIFTY            # internal symbol key used by the bot
+  - BANKNIFTY
 
 interval_seconds: 5  # how often to poll price / update candles (seconds)
 quantity: 50         # e.g., 50 units; adjust to your simulated lot size
@@ -13,12 +14,21 @@ smartapi:
   api_key: "9Ckbu4SY"
   client_id: "V54420165"
   password: "1971"
-  totp: "130644"        # or the OTP/2FA mechanism required by Angel
-  exchange: "NSE"
-  tradingsymbol: "NIFTY 50"  # check exact SmartAPI symbol name in Angel master list
-  symboltoken: "99926000"        # numeric token for Nifty from Angel master list
+  totp_secret: "T2HSV2QXBZO3CLRB64ICLUQT5E"
+  # per-symbol instrument config
+  instruments:
+    NIFTY:
+      exchange: "NSE"
+      tradingsymbol: "NIFTY 50"
+      symboltoken: "99926000"   # NIFTY 50 index token (Angel forum)[web:200]
+    BANKNIFTY:
+      exchange: "NSE"
+      tradingsymbol: "NIFTY BANK"
+      symboltoken: "99926009"   # example; confirm from scrip master or search API[web:203][web:211]
 
 telegram:
   enable: true
   bot_token: "8450333553:AAEtQ7MmpDpNNbl5UxZm6UH8-7eVSo7g6tU"
-  chat_id: "1210870341"
+  chat_ids: 
+    - "1210870341"
+    - "641595377"

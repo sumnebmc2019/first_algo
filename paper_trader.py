@@ -79,3 +79,15 @@ class PaperTrader:
             "unrealized": unreal,
             "total": self.cash + unreal,
         }
+
+    def realized_trade_pnl(self, side, symbol, qty, entry_price, exit_price):
+        """
+        Helper for per-trade P&L in paper mode.
+
+        side: "long" or "short"
+        """
+        if side == "long":
+            return (exit_price - entry_price) * qty
+        elif side == "short":
+            return (entry_price - exit_price) * qty
+        return 0.0

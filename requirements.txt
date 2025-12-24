@@ -2,3 +2,5 @@ numpy
 pandas
 pyyaml
 smartapi-python
+logzero
+websocket

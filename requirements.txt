@@ -4,3 +4,4 @@ pyyaml
 smartapi-python
 logzero
 websocket
+pyotp

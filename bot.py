@@ -231,22 +231,29 @@ def main():
                     if notifier and ok:
                         notifier.send(msg)
 
-            # every 5 minutes: send LTP of NIFTY and BANKNIFTY only
+            # every 5 minutes: send LTP of NIFTY and BANKNIFTY only,
+            # but only between 08:55 and 16:05 IST
             now = time.time()
             if now - last_ltp_ping >= ltp_ping_interval:
-                nifty_ltp = market_prices.get("NIFTY")
-                banknifty_ltp = market_prices.get("BANKNIFTY")
+                local_t = time.localtime(now)
+                current_minutes = local_t.tm_hour * 60 + local_t.tm_min
+                start_minutes = 8 * 60 + 55   # 08:55
+                end_minutes = 16 * 60 + 5     # 16:05
 
-                lines = ["SPOT LTP UPDATE (every 5 min)"]
-                if nifty_ltp is not None:
-                    lines.append(f"NIFTY: {nifty_ltp:.2f}")
-                if banknifty_ltp is not None:
-                    lines.append(f"BANKNIFTY: {banknifty_ltp:.2f}")
+                if start_minutes <= current_minutes <= end_minutes:
+                    nifty_ltp = market_prices.get("NIFTY")
+                    banknifty_ltp = market_prices.get("BANKNIFTY")
 
-                msg = "\n".join(lines)
-                print(msg)
-                if notifier:
-                    notifier.send(msg)
+                    lines = ["SPOT LTP UPDATE (every 5 min)"]
+                    if nifty_ltp is not None:
+                        lines.append(f"NIFTY: {nifty_ltp:.2f}")
+                    if banknifty_ltp is not None:
+                        lines.append(f"BANKNIFTY: {banknifty_ltp:.2f}")
+
+                    msg = "\n".join(lines)
+                    print(msg)
+                    if notifier:
+                        notifier.send(msg)
 
                 last_ltp_ping = now
 

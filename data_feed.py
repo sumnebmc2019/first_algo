@@ -1,111 +1,129 @@
-import random
 import time
+import json
 
-from SmartApi import SmartConnect  # requires smartapi-python
-import requests
 import pyotp
+from SmartApi import SmartConnect
 
 
 class SimulatedFeed:
-    """Generate a simple random-walk price series for a symbol."""
+    def __init__(self, start_price=100.0, volatility=0.5):
+        self.price = start_price
+        self.volatility = volatility
 
-    def __init__(self, start_price=100.0, volatility=0.2):
-        self.state = {}
-        self.start_price = float(start_price)
-        self.volatility = float(volatility)
+    def get_price(self, symbol: str):
+        import random
 
-    def _ensure(self, symbol):
-        if symbol not in self.state:
-            self.state[symbol] = {"price": self.start_price}
-
-    def get_price(self, symbol):
-        self._ensure(symbol)
-        p = self.state[symbol]["price"]
-        step = random.normalvariate(0, self.volatility)
-        p = max(0.01, p * (1 + step / 100.0))
-        self.state[symbol]["price"] = p
-        return {"symbol": symbol, "price": p, "time": time.time()}
+        move = random.uniform(-self.volatility, self.volatility)
+        self.price = max(1.0, self.price + move)
+        return {"symbol": symbol, "price": self.price, "time": time.time()}
 
 
 class SmartAPIConnector:
-    """Angel One SmartAPI connector for live quotes only (no orders)."""
-
     def __init__(
         self,
-        api_key=None,
-        client_id=None,
-        password=None,
-        totp_secret=None,
-        instruments=None,   # dict: symbol -> {exchange, tradingsymbol, symboltoken}
+        api_key: str,
+        client_id: str,
+        password: str,
+        totp_secret: str,
+        instruments: dict,
         notifier=None,
     ):
         self.api_key = api_key
         self.client_id = client_id
         self.password = password
         self.totp_secret = totp_secret
-        self.instruments = instruments or {}
+        self.instruments = instruments
         self.notifier = notifier
-
-        self.connected = False
         self.smart = None
-        self._login(first=True)
+        self.last_login = 0
+        self.login()
 
-    def _send_notify(self, text):
-        if self.notifier:
-            self.notifier.send(text)
-
-    def _login(self, first=False):
+    def login(self):
         self.smart = SmartConnect(api_key=self.api_key)
-        if not self.totp_secret:
-            raise RuntimeError("TOTP secret not configured in config.yaml")
-
-        totp = pyotp.TOTP(self.totp_secret).now()  # auto-generate TOTP[web:214][web:218]
+        totp = pyotp.TOTP(self.totp_secret).now()
         data = self.smart.generateSession(self.client_id, self.password, totp)
-        self.connected = True
-        tag = "INITIAL LOGIN ✅" if first else "RE-LOGIN ✅"
-        self._send_notify(f"SMARTAPI {tag}\nStatus: {data.get('status', True)}")
+        self.last_login = time.time()
+        if self.notifier:
+            self.notifier.send("SMARTAPI LOGIN ✅")
+        print("SMARTAPI LOGIN OK", data.get("status"))
 
-    def _ensure_login(self):
-        if not self.connected:
-            self._login()
+    def _ensure_logged_in(self):
+        # relogin every 6 hours as a simple safety
+        if time.time() - self.last_login > 6 * 60 * 60:
+            self.login()
 
-    def get_price(self, symbol):
-        """Return dict: {'symbol': symbol, 'price': float, 'time': timestamp}."""
-        self._ensure_login()
+    def _normalize_resp(self, resp):
+        if isinstance(resp, str):
+            return json.loads(resp)
+        return resp
 
+    def _handle_invalid_token_and_retry(self, func, *args, **kwargs):
+        try:
+            resp = func(*args, **kwargs)
+        except Exception as e:
+            if "AG8001" in str(e) or "Invalid Token" in str(e):
+                if self.notifier:
+                    self.notifier.send("SMARTAPI: Invalid Token AG8001, re-logging in…")
+                self.login()
+                resp = func(*args, **kwargs)
+            else:
+                raise
+        resp = self._normalize_resp(resp)
+        if not resp.get("success", True):
+            msg = resp.get("message", "")
+            code = resp.get("errorCode", "")
+            if "AG8001" in code or "Invalid Token" in msg:
+                if self.notifier:
+                    self.notifier.send(
+                        "SMARTAPI: Invalid Token AG8001 (resp), re-logging in…"
+                    )
+                self.login()
+                resp = func(*args, **kwargs)
+                resp = self._normalize_resp(resp)
+            if not resp.get("success", True):
+                raise RuntimeError(f"SmartAPI error: {resp}")
+        return resp
+
+    def get_price(self, symbol: str):
+        self._ensure_logged_in()
         inst = self.instruments.get(symbol)
         if inst is None:
             raise ValueError(f"No SmartAPI instrument config for symbol {symbol}")
-
         exchange = inst["exchange"]
         tradingsymbol = inst["tradingsymbol"]
         symboltoken = inst["symboltoken"]
 
-        resp = None
-        for attempt in range(3):
-            try:
-                resp = self.smart.ltpData(
-                    exchange,
-                    tradingsymbol,
-                    symboltoken,
-                )
-                break
-            except requests.exceptions.ReadTimeout as e:
-                if attempt == 2:
-                    raise RuntimeError(f"LTP ReadTimeout for {symbol}: {e}")
-                time.sleep(1)
-            except Exception as e:
-                msg = str(e)
-                # if token/auth issue, re-login once and retry
-                if any(k in msg.lower() for k in ["token", "jwt", "unauthorized", "session"]):
-                    self.connected = False
-                    self._login()
-                    continue
-                if attempt == 2:
-                    raise
+        def _ltp():
+            return self.smart.ltpData(exchange, tradingsymbol, symboltoken)
 
-        if resp is None or "data" not in resp or resp["data"] is None:
-            raise RuntimeError(f"LTP response invalid for {symbol}: {resp}")
-
+        resp = self._handle_invalid_token_and_retry(_ltp)
         ltp = float(resp["data"]["ltp"])
         return {"symbol": symbol, "price": ltp, "time": time.time()}
+
+    def get_historical(
+        self,
+        exchange: str,
+        symboltoken: str,
+        interval: str,
+        fromdate: str,
+        todate: str,
+    ):
+        """
+        Wrapper around SmartAPI getCandleData.
+        interval example: 'FIVE_MINUTE', 'FIFTEEN_MINUTE', 'ONE_MINUTE', etc.
+        fromdate/todate: 'YYYY-MM-DD HH:MM'
+        """
+        self._ensure_logged_in()
+
+        def _hist():
+            params = {
+                "exchange": exchange,
+                "symboltoken": symboltoken,
+                "interval": interval,
+                "fromdate": fromdate,
+                "todate": todate,
+            }
+            return self.smart.getCandleData(params)
+
+        resp = self._handle_invalid_token_and_retry(_hist)
+        return resp

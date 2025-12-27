@@ -1,9 +1,9 @@
-# -------- GENERAL --------
-mode: "paper"                  # used by bot.py (realtime paper trading)
+mode: "paper"              # "paper" or "live" for bot.py
 interval_seconds: 5
+quantity: 1
+starting_cash: 100000
 slippage: 0.0
 
-# Shared symbol list for realtime (bot.py) and history download
 symbols:
   - NIFTY
   - BANKNIFTY
@@ -16,14 +16,6 @@ symbols:
   - BANKNIFTY_FUT
   - RELIANCE_FUT
 
-# Capital and risk
-starting_cash_realtime: 100000     # 1L TOTAL for realtime (shared across all symbols)
-starting_cash_backtest: 100000     # 1L PER SYMBOL for backtest
-risk_per_trade: 0.01               # 1% risk per trade
-
-data_dir: "data"
-
-# -------- SMARTAPI --------
 smartapi:
   enable: true
   api_key: "9Ckbu4SY"
@@ -62,7 +54,7 @@ smartapi:
       symboltoken: "1594"
     NIFTY_FUT:
       exchange: "NFO"
-      tradingsymbol: "NIFTY27JAN26FUT"       # update monthly
+      tradingsymbol: "NIFTY27JAN26FUT"        # update monthly
       symboltoken: "49229"
     BANKNIFTY_FUT:
       exchange: "NFO"
@@ -73,7 +65,6 @@ smartapi:
       tradingsymbol: "RELIANCE26JANFUT"
       symboltoken: "1147579"
 
-# -------- TELEGRAM (REALTIME BOT) --------
 telegram:
   enable: true
   bot_token: "8450333553:AAEtQ7MmpDpNNbl5UxZm6UH8-7eVSo7g6tU"
@@ -84,7 +75,6 @@ telegram:
     - "792823272"
     - "1193914734"
 
-# -------- TELEGRAM (BACKTEST BOT) --------
 backtest_telegram:
   enable: true
   bot_token: "8411696443:AAENz2yoCmbgoyGXtgoc4vU-bnFCNwxQ1W0"
@@ -95,14 +85,10 @@ backtest_telegram:
     - "792823272"
     - "1193914734"
 
-# -------- BACKTEST SETTINGS --------
 backtest:
   data_dir: "data"          # where CSVs are stored
-  base_year: 2018           # first year with reliable data
-  months_to_run: 4          # 4 months per 6:00–12:00 session
-  
-  # legacy timing values from old config; logic moved into backtest.py
-  start_hour: 6
+  start_hour: 9
   start_minute: 0
-  end_hour: 12
+  end_hour: 16
   end_minute: 0
+  base_year: 2018           # first year with reliable data

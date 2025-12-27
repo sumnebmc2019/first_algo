@@ -10,21 +10,12 @@ from paper_trader import PaperTrader
 from telegram_notifier import TelegramNotifier
 
 
-STARTING_CASH = 100000  # 1 lakh
-
-
 def load_config(path="config.yaml"):
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
 
 def load_year_data(data_dir, symbol, year):
-    """
-    Load 5-minute candles for one symbol and year from CSV.
-
-    Expected file: data/<symbol>/<year>_5min.csv
-    Columns: datetime, open, high, low, close, volume
-    """
     path = os.path.join(data_dir, symbol, f"{year}_5min.csv")
     if not os.path.exists(path):
         return []
@@ -34,10 +25,8 @@ def load_year_data(data_dir, symbol, year):
         r = csv.DictReader(f)
         for row in r:
             dt_str = row["datetime"]
-            # handle both "YYYY-MM-DD HH:MM:SS" and ISO with T
             if "T" in dt_str:
-                dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S%z")
-                dt = dt.replace(tzinfo=None)
+                dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S%z").replace(tzinfo=None)
             else:
                 dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
             o = float(row["open"])
@@ -49,22 +38,15 @@ def load_year_data(data_dir, symbol, year):
     return rows
 
 
-def filter_first_n_months(candles, n_months):
-    """
-    Keep only first n_months of data in that calendar year.
-    """
+def filter_month_range(candles, start_month, months_to_run):
     if not candles:
         return candles
-    first_year = candles[0][0].year
-    max_month = min(12, n_months)
-    out = [c for c in candles if c[0].year == first_year and c[0].month <= max_month]
-    return out
+    year = candles[0][0].year
+    end_month = min(12, start_month + months_to_run - 1)
+    return [c for c in candles if c[0].year == year and start_month <= c[0].month <= end_month]
 
 
 def build_15m_from_5m(candles_5m):
-    """
-    Build synthetic 15-minute candles by grouping 3 consecutive 5m candles.
-    """
     candles_15m = []
     bucket = []
     for dt, o, h, l, c in candles_5m:
@@ -85,201 +67,252 @@ def build_15m_from_5m(candles_5m):
 def main():
     cfg = load_config("config.yaml")
     symbols = cfg["symbols"]
-
     bt_cfg = cfg.get("backtest", {})
-    data_dir = bt_cfg.get("data_dir", "data")
+    data_dir = bt_cfg.get("data_dir", cfg.get("data_dir", "data"))
+    base_year = bt_cfg.get("base_year", 2018)
+    months_to_run = bt_cfg.get("months_to_run", 4)
+    starting_cash = cfg.get("starting_cash_backtest", 100000)
+    risk_per_trade = cfg.get("risk_per_trade", 0.01)
 
-    # ---- CONTROL THESE TWO ----
-    backtest_year = 2023        # year that exists in your CSVs
-    months_to_run = 4           # run first 4 months of that year
-    # ---------------------------
+    backtest_year = base_year
+    start_month = 1
 
-    # Backtest Telegram bot
-    bt_tg_cfg = cfg.get("backtest_telegram", {})
+    tg_cfg = cfg.get("backtest_telegram", {})
     notifier = None
-    if bt_tg_cfg.get("enable", False):
+    if tg_cfg.get("enable", False):
         notifier = TelegramNotifier(
-            bot_token=bt_tg_cfg["bot_token"],
-            chat_ids=bt_tg_cfg.get("chat_ids", []),
+            bot_token=tg_cfg["bot_token"],
+            chat_ids=tg_cfg.get("chat_ids", []),
         )
 
-    print(f"Backtest year: {backtest_year}, months: 1–{months_to_run}")
-    if notifier:
-        try:
-            notifier.send(
-                f"BACKTEST STARTED for {backtest_year}, months 1–{months_to_run}, capital={STARTING_CASH}"
-            )
-        except Exception as e:
-            print("Backtest Telegram send error:", e)
-
-    # Load 5m data and build 15m (only first N months)
-    symbol_data_5m = {}
-    symbol_data_15m = {}
+    # Load data for all symbols
+    symbol_5m = {}
+    symbol_15m = {}
     total_candles = 0
+
     for s in symbols:
         candles_5m_all = load_year_data(data_dir, s, backtest_year)
-        candles_5m = filter_first_n_months(candles_5m_all, months_to_run)
-        symbol_data_5m[s] = candles_5m
+        candles_5m = filter_month_range(candles_5m_all, start_month, months_to_run)
+        symbol_5m[s] = candles_5m
         candles_15m = build_15m_from_5m(candles_5m)
-        symbol_data_15m[s] = candles_15m
+        symbol_15m[s] = candles_15m
         total_candles += len(candles_5m)
-        print(f"[{s}] loaded {len(candles_5m)} candles for {backtest_year} (first {months_to_run} months)")
+        print(
+            f"[BACKTEST] {s} loaded {len(candles_5m)} candles "
+            f"for {backtest_year} months {start_month}-{start_month + months_to_run - 1}"
+        )
 
     if total_candles == 0:
-        msg = f"No data for any symbol in year {backtest_year} (months 1–{months_to_run})"
+        msg = (
+            f"[BACKTEST] No data for any symbol {backtest_year} "
+            f"months {start_month}-{start_month + months_to_run - 1}"
+        )
         print(msg)
         if notifier:
-            try:
-                notifier.send(msg)
-            except Exception as e:
-                print("Backtest Telegram send error:", e)
+            notifier.send(msg)
         return
 
-    # Pace: compress N months into one day session 09:00–16:00 (7 hours)
-    session_seconds = 7 * 60 * 60
+    session_seconds = 6 * 60 * 60
     sleep_per_candle = session_seconds / total_candles
-    print(f"Total candles: {total_candles}, sleep_per_candle: {sleep_per_candle:.4f}s")
+    print(
+        f"[BACKTEST] total_candles={total_candles}, "
+        f"sleep_per_candle={sleep_per_candle:.4f}s"
+    )
 
-    # Set up traders and strategies per symbol
+    if notifier:
+        notifier.send(
+            f"[BACKTEST] START {backtest_year} months {start_month}-"
+            f"{start_month + months_to_run - 1}, capital={starting_cash} per symbol"
+        )
+
     traders = {
-        s: PaperTrader(starting_cash=STARTING_CASH, slippage=cfg.get("slippage", 0.0))
+        s: PaperTrader(starting_cash=starting_cash, slippage=cfg.get("slippage", 0.0))
         for s in symbols
     }
-    strategies = {
-        s: FiveEMA(ema_period=5, rr=3.0, max_trades_per_day=10000)
-        for s in symbols
-    }
+    strat = FiveEMA(ema_period=5, rr=3.0, max_trades_per_day=10000)
     market_prices = {s: None for s in symbols}
 
-    # Merge all 5m candles across symbols into a single chronological stream
+    # Combine all 5m candles across symbols into a single time-ordered list
     events = []
-    for s, candles in symbol_data_5m.items():
+    for s, candles in symbol_5m.items():
         for dt, o, h, l, c in candles:
             events.append((dt, s, o, h, l, c))
     events.sort(key=lambda x: x[0])
 
-    # Index 15m candles by datetime for each symbol
+    # 15m index per symbol
     idx_15m = {}
-    for s, candles in symbol_data_15m.items():
+    for s, candles in symbol_15m.items():
         idx_15m[s] = {dt: (o, h, l, c) for dt, o, h, l, c in candles}
 
-    qty = cfg.get("quantity", 1)
-    processed = 0
-    wall_start = time.time()
+    # P&L tracking per symbol and month
+    monthly_pnl = {s: {} for s in symbols}
+    current_month = None
 
-    # Helper: compute trade P&L explicitly from trader state
-    def compute_trade_pnl(trader, side, symbol, qty, entry_price, exit_price):
-        """
-        side: 'long' or 'short'
-        PnL = (exit - entry) * qty for long
-        PnL = (entry - exit) * qty for short
-        """
-        if side == "long":
-            return (exit_price - entry_price) * qty
-        else:
-            return (entry_price - exit_price) * qty
+    # track entry messages per (symbol, trade_id)
+    open_trades = {}  # (symbol, trade_id) -> info
+
+    wall_start = time.time()
 
     for dt, s, o, h, l, c in events:
         market_prices[s] = c
+        if current_month is None:
+            current_month = dt.month
 
-        # 5m update
-        sig = strategies[s].update_candle(o, h, l, c, dt.timestamp(), tf_minutes=5)
+        # 5m update (short logic)
+        sig_5 = strat.update_candle(s, o, h, l, c, dt.timestamp(), tf_minutes=5)
 
-        # 15m update if a 15m candle closes at this dt
+        # 15m update (long logic) if candle exists at this dt
+        sig_15 = None
         c15 = idx_15m[s].get(dt)
         if c15 is not None:
             o2, h2, l2, c2 = c15
-            sig2 = strategies[s].update_candle(
-                o2, h2, l2, c2, dt.timestamp(), tf_minutes=15
-            )
-            if sig2 is not None:
-                sig = sig2
+            sig_15 = strat.update_candle(s, o2, h2, l2, c2, dt.timestamp(), tf_minutes=15)
 
-        if sig is not None:
-            trader = traders[s]
+        signal = sig_15 or sig_5
+        st = strat.state[s]
+        trader = traders[s]
 
-            if sig["signal"] == "short_entry":
-                ok, ex_price = trader.sell_market(s, qty, sig["entry"])
+        # Month boundary summary when month changes
+        if dt.month != current_month:
+            prev_month = current_month
+            for sym in symbols:
+                pnl_m = monthly_pnl[sym].get(prev_month, 0.0)
+                if pnl_m == 0 and prev_month not in monthly_pnl[sym]:
+                    continue
                 msg = (
-                    f"[{s}] SHORT ENTRY (BACKTEST)\n"
-                    f"Time: {dt}\n"
-                    f"Qty: {qty}\n"
-                    f"Entry: {ex_price:.2f}\n"
-                    f"SL: {sig['sl']:.2f}\n"
-                    f"TP: {sig['tp']:.2f}"
+                    f"[BACKTEST] {sym} {backtest_year}-{prev_month:02d} summary\n"
+                    f"Realized P&L: {pnl_m:.2f}"
                 )
-                print(msg, "ok=", ok)
-                if notifier and ok:
-                    try:
-                        notifier.send(msg)
-                    except Exception as e:
-                        print("Backtest Telegram send error:", e)
+                print(msg)
+                if notifier:
+                    notifier.send(msg)
+            current_month = dt.month
 
-            elif sig["signal"] == "long_entry":
-                ok, ex_price = trader.buy_market(s, qty, sig["entry"])
-                msg = (
-                    f"[{s}] LONG ENTRY (BACKTEST)\n"
-                    f"Time: {dt}\n"
-                    f"Qty: {qty}\n"
-                    f"Entry: {ex_price:.2f}\n"
-                    f"SL: {sig['sl']:.2f}\n"
-                    f"TP: {sig['tp']:.2f}"
-                )
-                print(msg, "ok=", ok)
-                if notifier and ok:
-                    try:
-                        notifier.send(msg)
-                    except Exception as e:
-                        print("Backtest Telegram send error:", e)
+        # Handle entries
+        if signal and signal["signal"] in ("long_entry", "short_entry"):
+            if st["position"] is None:
+                entry = signal["entry"]
+                sl = signal["sl"]
+                tp = signal["tp"]
+                side_new = "long" if signal["signal"] == "long_entry" else "short"
 
-            elif sig["signal"] in ("exit_sl", "exit_tp"):
-                # Determine side from current position
-                pos_qty = trader.positions.get(s, 0)
-                side = "long" if pos_qty > 0 else "short"
+                risk = abs(entry - sl)
+                if risk <= 0:
+                    continue
+                risk_amount = trader.cash * risk_per_trade
+                qty = int(risk_amount / risk)
+                if qty <= 0:
+                    continue
+
+                if side_new == "long":
+                    ok, ex_price = trader.buy_market(s, qty, entry)
+                else:
+                    ok, ex_price = trader.sell_market(s, qty, entry)
+
+                if ok:
+                    trade_id = signal["trade_id"]
+                    st["position"] = {
+                        "side": side_new,
+                        "entry": ex_price,
+                        "sl": sl,
+                        "tp": tp,
+                        "trade_id": trade_id,
+                    }
+                    text = (
+                        f"[BT ENTRY] {s} #{trade_id}\n"
+                        f"Side: {side_new.upper()}\n"
+                        f"Time: {dt}\n"
+                        f"Qty: {qty}\n"
+                        f"Entry: {ex_price:.2f}\n"
+                        f"SL: {sl:.2f}\n"
+                        f"TP: {tp:.2f}"
+                    )
+                    print(text)
+                    entry_msg_ids = {}
+                    if notifier:
+                        entry_msg_ids = notifier.send(text)
+                    open_trades[(s, trade_id)] = {
+                        "side": side_new,
+                        "qty": qty,
+                        "entry": ex_price,
+                        "sl": sl,
+                        "tp": tp,
+                        "entry_msg_ids": entry_msg_ids,
+                    }
+
+        # Handle exits (SL/TP) using current price
+        exit_sig = strat.exit_signal(s, c)
+        if exit_sig:
+            side = exit_sig["side"]
+            exit_price = exit_sig["exit_price"]
+            trade_id = exit_sig["trade_id"]
+            info = open_trades.get((s, trade_id))
+            if info:
+                qty = info["qty"]
+                entry_price = info["entry"]
 
                 if side == "short":
-                    ok, ex_price = trader.buy_market(s, abs(pos_qty), sig["exit_price"])
+                    ok, ex_price = trader.buy_market(s, qty, exit_price)
                 else:
-                    ok, ex_price = trader.sell_market(s, abs(pos_qty), sig["exit_price"])
+                    ok, ex_price = trader.sell_market(s, qty, exit_price)
 
-                # Use stored avg_price as entry, fallback to signal if missing
-                entry_price = trader.avg_price.get(s, sig["exit_price"])
-                pnl_trade = compute_trade_pnl(
-                    trader, side, s, abs(pos_qty), entry_price, ex_price if ok else sig["exit_price"]
+                actual_exit = ex_price if ok else exit_price
+                pnl_trade = trader.record_realized_trade_pnl(
+                    s, side, qty, entry_price, actual_exit
                 )
+                month_key = dt.month
+                monthly_pnl[s][month_key] = monthly_pnl[s].get(month_key, 0.0) + pnl_trade
 
-                msg = (
-                    f"[{s}] EXIT {sig['signal'].upper()} (BACKTEST)\n"
-                    f"Time: {dt}\n"
+                text = (
+                    f"[BT EXIT] {s} #{trade_id} {exit_sig['signal'].upper()}\n"
                     f"Side: {side.upper()}\n"
-                    f"Qty: {abs(pos_qty)}\n"
+                    f"Time: {dt}\n"
+                    f"Qty: {qty}\n"
                     f"Entry: {entry_price:.2f}\n"
-                    f"Exit: {ex_price:.2f}\n"
+                    f"Exit: {actual_exit:.2f}\n"
                     f"Trade P&L: {pnl_trade:.2f}"
                 )
-                print(msg, "ok=", ok)
-                if notifier and ok:
-                    try:
-                        notifier.send(msg)
-                    except Exception as e:
-                        print("Backtest Telegram send error:", e)
+                print(text)
+                reply_id = None
+                if info["entry_msg_ids"]:
+                    reply_id = next(iter(info["entry_msg_ids"].values()))
+                if notifier:
+                    notifier.send(text, reply_to_message_id=reply_id)
+                del open_trades[(s, trade_id)]
 
-        processed += 1
         time.sleep(sleep_per_candle)
 
-    # Summary
+    # Final month summaries
+    if current_month is not None:
+        last_month = current_month
+        for sym in symbols:
+            pnl_m = monthly_pnl[sym].get(last_month, 0.0)
+            if last_month in monthly_pnl[sym]:
+                msg = (
+                    f"[BACKTEST] {sym} {backtest_year}-{last_month:02d} summary\n"
+                    f"Realized P&L: {pnl_m:.2f}"
+                )
+                print(msg)
+                if notifier:
+                    notifier.send(msg)
+
+    # 4‑month consolidated summary per symbol
+    for sym in symbols:
+        total_sym_pnl = sum(monthly_pnl[sym].values())
+        msg = (
+            f"[BACKTEST] {sym} consolidated P&L {backtest_year} "
+            f"months {start_month}-{start_month + months_to_run - 1}: {total_sym_pnl:.2f}"
+        )
+        print(msg)
+        if notifier:
+            notifier.send(msg)
+
     elapsed = time.time() - wall_start
     if notifier:
-        try:
-            notifier.send(
-                f"BACKTEST COMPLETED for {backtest_year}, months 1–{months_to_run} in {int(elapsed)} seconds"
-            )
-        except Exception as e:
-            print("Backtest Telegram send error:", e)
-
-    for s, trader in traders.items():
-        pnl = trader.pnl(market_prices)
-        print(f"{s} FINAL PNL (mark-to-market): {pnl:.2f}")
+        notifier.send(
+            f"[BACKTEST] COMPLETED {backtest_year} months {start_month}-"
+            f"{start_month + months_to_run - 1} in {int(elapsed)}s"
+        )
 
 
 if __name__ == "__main__":

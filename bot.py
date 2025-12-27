@@ -23,8 +23,7 @@ class CandleBuilder:
         """
         Update candle for a symbol with new tick.
 
-        Returns:
-            completed_candle (o, h, l, c) or None.
+        Returns completed_candle (o, h, l, c) or None.
         """
         cndl = self.current.get(symbol)
         if cndl is None:
@@ -57,35 +56,24 @@ class CandleBuilder:
 def main():
     cfg = load_config("config.yaml")
     mode = cfg.get("mode", "paper")
-    symbols_cfg = cfg.get("symbols", [])
+    symbols = cfg.get("symbols", [])
     interval = cfg.get("interval_seconds", 5)
-    qty = cfg.get("quantity", 1)
-    starting = cfg.get("starting_cash", 100000)
     slippage = cfg.get("slippage", 0.0)
+    starting_cash = cfg.get("starting_cash_realtime", 100000)
+    risk_per_trade = cfg.get("risk_per_trade", 0.01)
 
-    # Flatten symbols list
-    symbols = []
-    for item in symbols_cfg:
-        if isinstance(item, dict):
-            symbols.extend(item.keys())
-        else:
-            symbols.append(item)
+    trader = PaperTrader(starting_cash=starting_cash, slippage=slippage)
+    strategy = FiveEMA(ema_period=5, rr=3.0, max_trades_per_day=5)
 
-    trader = PaperTrader(starting_cash=starting, slippage=slippage)
-    strategy = {s: FiveEMA(ema_period=5, rr=3.0, max_trades_per_day=5) for s in symbols}
-
-    # Telegram notifier (multi chat_ids)
     tg_cfg = cfg.get("telegram", {})
-    use_telegram = tg_cfg.get("enable", False)
     notifier = None
-    if use_telegram:
+    if tg_cfg.get("enable", False):
         chat_ids = tg_cfg.get("chat_ids") or tg_cfg.get("chat_id")
         notifier = TelegramNotifier(
             bot_token=tg_cfg.get("bot_token"),
             chat_ids=chat_ids,
         )
 
-    # SmartAPI / Simulated feed
     sa_cfg = cfg.get("smartapi", {})
     use_smartapi = sa_cfg.get("enable", False)
 
@@ -107,22 +95,24 @@ def main():
     candle_5m = CandleBuilder(bar_seconds=300)
     candle_15m = CandleBuilder(bar_seconds=900)
 
-    # 5-minute LTP update timer
     last_ltp_ping = 0
     ltp_ping_interval = 300  # seconds
+
+    # track open trades per (symbol, trade_id)
+    open_trades = {}
 
     if notifier:
         start_msg = (
             "BOT STARTED ✅\n"
             f"Mode: {mode}\n"
-            f"Symbols: {', '.join(symbols)}"
+            f"Symbols: {', '.join(symbols)}\n"
+            f"Start capital: {starting_cash}"
         )
         notifier.send(start_msg)
 
     try:
         while True:
             for s in symbols:
-                # get latest price
                 try:
                     tick = conn.get_price(s)
                 except Exception as e:
@@ -135,110 +125,118 @@ def main():
                 ts = tick["time"]
                 market_prices[s] = price
 
-                # build 5m and 15m candles
                 completed_5m = candle_5m.update(s, price, ts)
                 completed_15m = candle_15m.update(s, price, ts)
 
                 sig = None
 
-                # short side (5m)
                 if completed_5m is not None:
                     o, h, l, c = completed_5m
-                    sig = strategy[s].update_candle(o, h, l, c, ts, tf_minutes=5)
+                    sig = strategy.update_candle(s, o, h, l, c, ts, tf_minutes=5)
 
-                # long side (15m)
                 if completed_15m is not None:
                     o2, h2, l2, c2 = completed_15m
-                    sig2 = strategy[s].update_candle(o2, h2, l2, c2, ts, tf_minutes=15)
+                    sig2 = strategy.update_candle(s, o2, h2, l2, c2, ts, tf_minutes=15)
                     if sig2 is not None:
                         sig = sig2
 
-                if sig is None:
-                    continue
+                # Entry handling
+                if sig and sig["signal"] in ("short_entry", "long_entry"):
+                    st = strategy.state[s]
+                    if st["position"] is not None:
+                        continue  # already in a trade for this symbol
 
-                # handle entries
-                if sig["signal"] == "short_entry":
-                    ok, ex_price = trader.sell_market(s, qty, sig["entry"])
-                    msg = (
-                        f"[{s}] SHORT ENTRY\n"
-                        f"Qty: {qty}\n"
-                        f"Entry: {ex_price:.2f}\n"
-                        f"SL: {sig['sl']:.2f}\n"
-                        f"TP: {sig['tp']:.2f}"
-                    )
-                    print(msg, "ok=", ok)
-                    if notifier and ok:
-                        notifier.send(msg)
+                    entry = sig["entry"]
+                    sl = sig["sl"]
+                    tp = sig["tp"]
+                    side_new = "long" if sig["signal"] == "long_entry" else "short"
 
-                elif sig["signal"] == "long_entry":
-                    ok, ex_price = trader.buy_market(s, qty, sig["entry"])
-                    msg = (
-                        f"[{s}] LONG ENTRY\n"
-                        f"Qty: {qty}\n"
-                        f"Entry: {ex_price:.2f}\n"
-                        f"SL: {sig['sl']:.2f}\n"
-                        f"TP: {sig['tp']:.2f}"
-                    )
-                    print(msg, "ok=", ok)
-                    if notifier and ok:
-                        notifier.send(msg)
+                    risk = abs(entry - sl)
+                    if risk <= 0:
+                        continue
+                    risk_amount = trader.cash * risk_per_trade
+                    qty = int(risk_amount / risk)
+                    if qty <= 0:
+                        continue
 
-                # handle exits with accurate per-trade P&L
-                elif sig["signal"] in ("exit_sl", "exit_tp"):
-                    pos_qty = trader.positions.get(s, 0)
-                    side = "long" if pos_qty > 0 else "short"
-
-                    if side == "short":
-                        ok, ex_price = trader.buy_market(s, qty, sig["exit_price"])
+                    if side_new == "long":
+                        ok, ex_price = trader.buy_market(s, qty, entry)
                     else:
-                        ok, ex_price = trader.sell_market(s, qty, sig["exit_price"])
+                        ok, ex_price = trader.sell_market(s, qty, entry)
 
-                    # use avg entry price from PaperTrader for P&L
-                    # note: after this trade, position may be 0, so capture avg before trade
-                    entry_price = None
-                    if side == "long":
-                        # for long, avg_price was the buy price
-                        entry_price = sig["exit_price"] if s not in trader.avg_price else trader.avg_price.get(s, sig["exit_price"])
-                    else:
-                        entry_price = sig["exit_price"] if s not in trader.avg_price else trader.avg_price.get(s, sig["exit_price"])
+                    if ok:
+                        trade_id = sig["trade_id"]
+                        st["position"] = {
+                            "side": side_new,
+                            "entry": ex_price,
+                            "sl": sl,
+                            "tp": tp,
+                            "trade_id": trade_id,
+                        }
+                        text = (
+                            f"[RT ENTRY] {s} #{trade_id}\n"
+                            f"Side: {side_new.upper()}\n"
+                            f"Qty: {qty}\n"
+                            f"Entry: {ex_price:.2f}\n"
+                            f"SL: {sl:.2f}\n"
+                            f"TP: {tp:.2f}"
+                        )
+                        entry_msg_ids = {}
+                        if notifier:
+                            entry_msg_ids = notifier.send(text)
+                        open_trades[(s, trade_id)] = {
+                            "side": side_new,
+                            "qty": qty,
+                            "entry": ex_price,
+                            "sl": sl,
+                            "tp": tp,
+                            "entry_msg_ids": entry_msg_ids,
+                        }
 
-                    # safer: get entry from last opposing trade in trade_log
-                    if entry_price is None and trader.trade_log:
-                        for t in reversed(trader.trade_log):
-                            if t["symbol"] == s:
-                                entry_price = t["price"]
-                                break
+                # Exit handling with current price
+                exit_sig = strategy.exit_signal(s, price)
+                if exit_sig:
+                    side = exit_sig["side"]
+                    exit_price = exit_sig["exit_price"]
+                    trade_id = exit_sig["trade_id"]
+                    info = open_trades.get((s, trade_id))
+                    if info:
+                        qty = info["qty"]
+                        entry_price = info["entry"]
 
-                    if entry_price is None:
-                        entry_price = sig["exit_price"]
+                        if side == "short":
+                            ok, ex_price = trader.buy_market(s, qty, exit_price)
+                        else:
+                            ok, ex_price = trader.sell_market(s, qty, exit_price)
 
-                    pnl_trade = trader.realized_trade_pnl(
-                        "long" if side == "long" else "short",
-                        s,
-                        qty,
-                        entry_price,
-                        ex_price if ok else sig["exit_price"],
-                    )
+                        actual_exit = ex_price if ok else exit_price
+                        pnl_trade = trader.record_realized_trade_pnl(
+                            s, side, qty, entry_price, actual_exit
+                        )
+                        equity_now = trader.equity(market_prices)
 
-                    msg = (
-                        f"[{s}] EXIT {sig['signal'].upper()}\n"
-                        f"Side: {side.upper()}\n"
-                        f"Qty: {qty}\n"
-                        f"Price: {ex_price:.2f}\n"
-                        f"P&L: {pnl_trade:.2f}"
-                    )
-                    print(msg, "ok=", ok)
-                    if notifier and ok:
-                        notifier.send(msg)
+                        text = (
+                            f"[RT EXIT] {s} #{trade_id} {exit_sig['signal'].upper()}\n"
+                            f"Side: {side.upper()}\n"
+                            f"Qty: {qty}\n"
+                            f"Entry: {entry_price:.2f}\n"
+                            f"Exit: {actual_exit:.2f}\n"
+                            f"Trade P&L: {pnl_trade:.2f}\n"
+                            f"Equity: {equity_now:.2f}"
+                        )
+                        reply_id = None
+                        if info["entry_msg_ids"]:
+                            reply_id = next(iter(info["entry_msg_ids"].values()))
+                        if notifier:
+                            notifier.send(text, reply_to_message_id=reply_id)
+                        del open_trades[(s, trade_id)]
 
-            # every 5 minutes: send LTP of NIFTY and BANKNIFTY only,
-            # but only between 08:55 and 16:05 IST
             now = time.time()
             if now - last_ltp_ping >= ltp_ping_interval:
                 local_t = time.localtime(now)
                 current_minutes = local_t.tm_hour * 60 + local_t.tm_min
-                start_minutes = 8 * 60 + 55   # 08:55
-                end_minutes = 16 * 60 + 5     # 16:05
+                start_minutes = 8 * 60 + 55
+                end_minutes = 16 * 60 + 5
 
                 if start_minutes <= current_minutes <= end_minutes:
                     nifty_ltp = market_prices.get("NIFTY")

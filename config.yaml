@@ -12,9 +12,9 @@ symbols:
   - ICICIBANK
   - TCS
   - INFY
-  - NIFTY_FUT
-  - BANKNIFTY_FUT
-  - RELIANCE_FUT
+#  - NIFTY_FUT
+#  - BANKNIFTY_FUT
+#  - RELIANCE_FUT
 
 # Capital and risk
 starting_cash_realtime: 100000     # 1L TOTAL for realtime (shared across all symbols)

@@ -96,7 +96,7 @@ def main():
     candle_15m = CandleBuilder(bar_seconds=900)
 
     last_ltp_ping = 0
-    ltp_ping_interval = 300  # seconds
+    ltp_ping_interval = 600  # seconds
 
     # track open trades per (symbol, trade_id)
     open_trades = {}

@@ -23,10 +23,11 @@ class TelegramNotifier:
                     "chat_id": chat_id,
                     "text": text,
                     "disable_web_page_preview": True,
+                    "parse_mode": "HTML",
                 }
                 if reply_to_message_id is not None:
                     payload["reply_to_message_id"] = reply_to_message_id
-                resp = requests.post(url, data=payload, timeout=5)
+                resp = requests.post(url, data=payload, timeout=10)
                 resp.raise_for_status()
                 data = resp.json()
                 if data.get("ok") and "result" in data:

@@ -2,6 +2,7 @@ import time
 from collections import defaultdict
 
 
+
 class FiveEMA:
     """
     Power-of-Stocks style 5 EMA strategy, long + short, with:
@@ -11,14 +12,17 @@ class FiveEMA:
     - Exit via SL/TP checked externally using exit_signal().
     """
 
+
     def __init__(self, ema_period=5, rr=3.0, max_trades_per_day=5):
         self.ema_period = ema_period
         self.alpha = 2 / (ema_period + 1)
         self.rr = rr
         self.max_trades_per_day = max_trades_per_day
 
+
         # Per-symbol state so multiple symbols can share one object
         self.state = defaultdict(self._new_symbol_state)
+
 
     def _new_symbol_state(self):
         return {
@@ -32,21 +36,25 @@ class FiveEMA:
             "next_trade_id": 1,
         }
 
+
     def _reset_day_if_needed(self, st, ts):
         day = time.strftime("%Y-%m-%d", time.localtime(ts))
         if st["current_day"] != day:
             st["current_day"] = day
             st["trades_today"] = 0
 
+
     def _can_trade(self, st, ts):
         self._reset_day_if_needed(st, ts)
         return st["trades_today"] < self.max_trades_per_day
+
 
     def _record_trade(self, st):
         st["trades_today"] += 1
         trade_id = st["next_trade_id"]
         st["next_trade_id"] += 1
         return trade_id
+
 
     def update_candle(self, symbol, o, h, l, c, ts, tf_minutes):
         """
@@ -67,6 +75,7 @@ class FiveEMA:
         st = self.state[symbol]
         self._reset_day_if_needed(st, ts)
 
+
         # Update EMA
         if tf_minutes == 5:
             if st["ema_short"] is None:
@@ -81,24 +90,30 @@ class FiveEMA:
         else:
             return None
 
+
         # If already in position, do not generate new entries here
         if st["position"] is not None:
             return None
+
 
         # If flat but daily limit reached, ignore new entries
         if not self._can_trade(st, ts):
             return None
 
+
         # SHORT SIDE (5m)
         if tf_minutes == 5 and st["ema_short"] is not None:
             ema_short = st["ema_short"]
+
 
             if st["signal_short"] is None:
                 if h > ema_short and l > ema_short:
                     st["signal_short"] = {"high": h, "low": l}
                 return None
 
+
             sig = st["signal_short"]
+
 
             if c < sig["low"]:
                 entry = c
@@ -126,24 +141,30 @@ class FiveEMA:
                     "trade_id": trade_id,
                 }
 
+
             if l > ema_short and c >= sig["low"]:
                 st["signal_short"] = {"high": h, "low": l}
                 return None
+
 
             if l <= ema_short:
                 st["signal_short"] = None
             return None
 
+
         # LONG SIDE (15m)
         if tf_minutes == 15 and st["ema_long"] is not None:
             ema_long = st["ema_long"]
+
 
             if st["signal_long"] is None:
                 if l < ema_long and h < ema_long:
                     st["signal_long"] = {"high": h, "low": l}
                 return None
 
+
             sig = st["signal_long"]
+
 
             if c > sig["high"]:
                 entry = c
@@ -171,38 +192,44 @@ class FiveEMA:
                     "trade_id": trade_id,
                 }
 
+
             if h < ema_long and c <= sig["high"]:
                 st["signal_long"] = {"high": h, "low": l}
                 return None
+
 
             if h >= ema_long:
                 st["signal_long"] = None
             return None
 
+
         return None
+
 
     def exit_signal(self, symbol, price):
         """
         Check if current price triggers SL/TP for the open position.
 
         Returns:
-          None or dict:
-            {
-              "symbol": symbol,
-              "signal": "exit_sl"/"exit_tp",
-              "exit_price": float,
-              "trade_id": int,
-              "side": "long"/"short"
-            }
+            None or dict:
+              {
+                "symbol": symbol,
+                "signal": "exit_sl"/"exit_tp",
+                "exit_price": float,
+                "trade_id": int,
+                "side": "long"/"short"
+              }
         """
         st = self.state[symbol]
         pos = st["position"]
         if pos is None:
             return None
 
+
         side = pos["side"]
         sl = pos["sl"]
         tp = pos["tp"]
+
 
         if side == "short":
             if price >= sl:
@@ -222,6 +249,7 @@ class FiveEMA:
                 sig = "exit_tp"
             else:
                 return None
+
 
         trade_id = pos["trade_id"]
         st["position"] = None

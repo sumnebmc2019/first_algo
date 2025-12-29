@@ -155,7 +155,7 @@ def main():
         # 5m update (short logic)
         sig_5 = strat.update_candle(s, o, h, l, c, dt.timestamp(), tf_minutes=5)
         if sig_5:
-            sig_5 = {k: v for k in sig_5 if k != "symbol"}
+            sig_5 = {k: v for k, v in sig_5.items() if k != "symbol"}
 
         # 15m update (long logic) if candle exists at this dt
         sig_15 = None
@@ -164,7 +164,7 @@ def main():
             o2, h2, l2, c2 = c15
             sig_15 = strat.update_candle(s, o2, h2, l2, c2, dt.timestamp(), tf_minutes=15)
             if sig_15:
-                sig_15 = {k: v for k in sig_15 if k != "symbol"}
+                sig_15 = {k: v for k, v in sig_15.items() if k != "symbol"}
 
         signal = sig_15 or sig_5
         st = strat.state[s]

@@ -93,20 +93,17 @@ def main():
     for s in symbols:
         candles_5m_all = load_year_data(data_dir, s, backtest_year)
         candles_5m = filter_month_range(candles_5m_all, start_month, months_to_run)
-        symbol_5m[s] = candles_5m
-        candles_15m = build_15m_from_5m(candles_5m)
-        symbol_15m[s] = candles_15m
-        total_candles += len(candles_5m)
-        print(
-            f"[BACKTEST] {s} loaded {len(candles_5m)} candles "
-            f"for {backtest_year} months {start_month}-{start_month + months_to_run - 1}"
-        )
+        if candles_5m:
+            symbol_5m[s] = candles_5m
+            candles_15m = build_15m_from_5m(candles_5m)
+            symbol_15m[s] = candles_15m
+            total_candles += len(candles_5m)
+            print(f"[{s}] {len(candles_5m)} candles loaded ✓")
+        else:
+            print(f"[{s}] NO DATA - skipping")
 
     if total_candles == 0:
-        msg = (
-            f"[BACKTEST] No data for any symbol {backtest_year} "
-            f"months {start_month}-{start_month + months_to_run - 1}"
-        )
+        msg = f"[BACKTEST] No data for {backtest_year} months {start_month}-{start_month + months_to_run - 1}"
         print(msg)
         if notifier:
             notifier.send(msg)
@@ -114,15 +111,12 @@ def main():
 
     session_seconds = 6 * 60 * 60
     sleep_per_candle = session_seconds / total_candles
-    print(
-        f"[BACKTEST] total_candles={total_candles}, "
-        f"sleep_per_candle={sleep_per_candle:.4f}s"
-    )
+    print(f"[BACKTEST] total_candles={total_candles}, sleep_per_candle={sleep_per_candle:.4f}s")
 
     if notifier:
         notifier.send(
             f"[BACKTEST] START {backtest_year} months {start_month}-"
-            f"{start_month + months_to_run - 1}, capital={starting_cash} per symbol"
+            f"{start_month + months_to_run - 1}, capital=₹{starting_cash:,} per symbol"
         )
 
     traders = {
@@ -160,6 +154,8 @@ def main():
 
         # 5m update (short logic)
         sig_5 = strat.update_candle(s, o, h, l, c, dt.timestamp(), tf_minutes=5)
+        if sig_5:
+            sig_5 = {k: v for k in sig_5 if k != "symbol"}
 
         # 15m update (long logic) if candle exists at this dt
         sig_15 = None
@@ -167,6 +163,8 @@ def main():
         if c15 is not None:
             o2, h2, l2, c2 = c15
             sig_15 = strat.update_candle(s, o2, h2, l2, c2, dt.timestamp(), tf_minutes=15)
+            if sig_15:
+                sig_15 = {k: v for k in sig_15 if k != "symbol"}
 
         signal = sig_15 or sig_5
         st = strat.state[s]
@@ -181,7 +179,7 @@ def main():
                     continue
                 msg = (
                     f"[BACKTEST] {sym} {backtest_year}-{prev_month:02d} summary\n"
-                    f"Realized P&L: {pnl_m:.2f}"
+                    f"Realized P&L: ₹{pnl_m:,.2f}"
                 )
                 print(msg)
                 if notifier:
@@ -219,13 +217,13 @@ def main():
                         "trade_id": trade_id,
                     }
                     text = (
-                        f"[BT ENTRY] {s} #{trade_id}\n"
+                        f"📈 [BT ENTRY] {s} #{trade_id}\n"
                         f"Side: {side_new.upper()}\n"
                         f"Time: {dt}\n"
                         f"Qty: {qty}\n"
-                        f"Entry: {ex_price:.2f}\n"
-                        f"SL: {sl:.2f}\n"
-                        f"TP: {tp:.2f}"
+                        f"Entry: ₹{ex_price:,.2f}\n"
+                        f"SL: ₹{sl:,.2f}\n"
+                        f"TP: ₹{tp:,.2f}"
                     )
                     print(text)
                     entry_msg_ids = {}
@@ -242,7 +240,8 @@ def main():
 
         # Handle exits (SL/TP) using current price
         exit_sig = strat.exit_signal(s, c)
-        if exit_sig:
+        if exit_sig and exit_sig.get("signal"):
+            exit_sig = {k: v for k in exit_sig if k != "symbol"}
             side = exit_sig["side"]
             exit_price = exit_sig["exit_price"]
             trade_id = exit_sig["trade_id"]
@@ -263,14 +262,16 @@ def main():
                 month_key = dt.month
                 monthly_pnl[s][month_key] = monthly_pnl[s].get(month_key, 0.0) + pnl_trade
 
+                equity = trader.equity(market_prices)
                 text = (
-                    f"[BT EXIT] {s} #{trade_id} {exit_sig['signal'].upper()}\n"
+                    f"📉 [BT EXIT] {s} #{trade_id} {exit_sig['signal'].upper()}\n"
                     f"Side: {side.upper()}\n"
                     f"Time: {dt}\n"
                     f"Qty: {qty}\n"
-                    f"Entry: {entry_price:.2f}\n"
-                    f"Exit: {actual_exit:.2f}\n"
-                    f"Trade P&L: {pnl_trade:.2f}"
+                    f"Entry: ₹{entry_price:,.2f}\n"
+                    f"Exit: ₹{actual_exit:,.2f}\n"
+                    f"Trade P&L: ₹{pnl_trade:,.2f}\n"
+                    f"Symbol Equity: ₹{equity:,.2f}"
                 )
                 print(text)
                 reply_id = None
@@ -290,18 +291,19 @@ def main():
             if last_month in monthly_pnl[sym]:
                 msg = (
                     f"[BACKTEST] {sym} {backtest_year}-{last_month:02d} summary\n"
-                    f"Realized P&L: {pnl_m:.2f}"
+                    f"Realized P&L: ₹{pnl_m:,.2f}"
                 )
                 print(msg)
                 if notifier:
                     notifier.send(msg)
 
-    # 4‑month consolidated summary per symbol
+    # 4-month consolidated summary per symbol
     for sym in symbols:
         total_sym_pnl = sum(monthly_pnl[sym].values())
+        equity = traders[sym].equity(market_prices) if sym in traders else starting_cash
         msg = (
-            f"[BACKTEST] {sym} consolidated P&L {backtest_year} "
-            f"months {start_month}-{start_month + months_to_run - 1}: {total_sym_pnl:.2f}"
+            f"[BACKTEST] {sym} FINAL {backtest_year} M{start_month}-{start_month + months_to_run - 1}\n"
+            f"P&L: ₹{total_sym_pnl:,.2f} | Equity: ₹{equity:,.2f}"
         )
         print(msg)
         if notifier:
@@ -310,8 +312,8 @@ def main():
     elapsed = time.time() - wall_start
     if notifier:
         notifier.send(
-            f"[BACKTEST] COMPLETED {backtest_year} months {start_month}-"
-            f"{start_month + months_to_run - 1} in {int(elapsed)}s"
+            f"[BACKTEST] ✅ COMPLETED {backtest_year} M{start_month}-"
+            f"{start_month + months_to_run - 1} in {int(elapsed/60)}min"
         )
 
 

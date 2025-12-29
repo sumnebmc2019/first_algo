@@ -1,5 +1,6 @@
 import time
 import yaml
+from datetime import datetime
 
 from strategy import FiveEMA
 from paper_trader import PaperTrader
@@ -13,22 +14,23 @@ def load_config(path="config.yaml"):
 
 
 class CandleBuilder:
-    """Build fixed-length candles (e.g., 5-minute) from tick prices."""
+    """Build fixed 5min/15min candles aligned to clock multiples from tick prices."""
 
-    def __init__(self, bar_seconds=300):
-        self.bar_seconds = bar_seconds
-        self.current = {}  # symbol -> candle dict
+    def __init__(self, tf_minutes=5):
+        self.tf_seconds = tf_minutes * 60
+        self.current = {}  # symbol_timestamp -> candle dict
 
     def update(self, symbol, price, ts):
-        """
-        Update candle for a symbol with new tick.
-
-        Returns completed_candle (o, h, l, c) or None.
-        """
-        cndl = self.current.get(symbol)
+        """Returns completed candle snapped to 5min/15min boundaries."""
+        # Snap to candle boundary: floor to nearest 5min/15min
+        candle_start = (int(ts) // self.tf_seconds) * self.tf_seconds
+        
+        cndl_key = f"{symbol}_{candle_start}"
+        cndl = self.current.get(cndl_key)
+        
         if cndl is None:
-            self.current[symbol] = {
-                "start": ts,
+            self.current[cndl_key] = {
+                "start": candle_start,
                 "o": price,
                 "h": price,
                 "l": price,
@@ -36,20 +38,16 @@ class CandleBuilder:
             }
             return None
 
-        if ts - cndl["start"] < self.bar_seconds:
+        if ts - candle_start < self.tf_seconds:
             cndl["h"] = max(cndl["h"], price)
             cndl["l"] = min(cndl["l"], price)
             cndl["c"] = price
             return None
         else:
             completed = (cndl["o"], cndl["h"], cndl["l"], cndl["c"])
-            self.current[symbol] = {
-                "start": ts,
-                "o": price,
-                "h": price,
-                "l": price,
-                "c": price,
-            }
+            # Clean old candles (keep last 20 per symbol)
+            if len(self.current) > 100:
+                self.current = {k: v for k, v in self.current.items() if ts - v["start"] < 3600}
             return completed
 
 
@@ -92,59 +90,78 @@ def main():
     print(f"Starting bot in {mode} mode for symbols: {symbols}")
     market_prices = {s: None for s in symbols}
 
-    candle_5m = CandleBuilder(bar_seconds=300)
-    candle_15m = CandleBuilder(bar_seconds=900)
+    candle_5m = CandleBuilder(tf_minutes=5)
+    candle_15m = CandleBuilder(tf_minutes=15)
 
     last_ltp_ping = 0
-    ltp_ping_interval = 300  # seconds
+    ltp_ping_interval = 600  # 10 minutes
 
-    # track open trades per (symbol, trade_id)
-    open_trades = {}
+    open_trades = {}  # (symbol, trade_id) -> info
 
     if notifier:
         start_msg = (
-            "BOT STARTED ✅\n"
+            "🤖 RT BOT STARTED ✅\n"
             f"Mode: {mode}\n"
             f"Symbols: {', '.join(symbols)}\n"
-            f"Start capital: {starting_cash}"
+            f"Capital: ₹{starting_cash:,}"
         )
         notifier.send(start_msg)
 
     try:
         while True:
+            # Skip weekends (Sat=5, Sun=6)
+            now = datetime.now()
+            if now.weekday() >= 5:
+                time.sleep(interval)
+                continue
+
+            # Market hours: 9:15-15:30 IST
+            current_time = now.time()
+            market_start = datetime.strptime("09:15", "%H:%M").time()
+            market_end = datetime.strptime("15:30", "%H:%M").time()
+            
+            if not (market_start <= current_time <= market_end):
+                time.sleep(interval)
+                continue
+
             for s in symbols:
                 try:
                     tick = conn.get_price(s)
+                    price = tick["price"]
+                    ts = tick["time"]
                 except Exception as e:
                     print(f"[{s}] PRICE ERROR: {e}")
-                    if notifier:
-                        notifier.send(f"[{s}] PRICE ERROR: {e}")
                     continue
 
-                price = tick["price"]
-                ts = tick["time"]
                 market_prices[s] = price
 
+                # Build clock-aligned candles
                 completed_5m = candle_5m.update(s, price, ts)
                 completed_15m = candle_15m.update(s, price, ts)
 
                 sig = None
 
+                # 5m signal (short-term)
                 if completed_5m is not None:
                     o, h, l, c = completed_5m
                     sig = strategy.update_candle(s, o, h, l, c, ts, tf_minutes=5)
+                    if sig:
+                        sig = {k: v for k in sig if k != "symbol"}
+                        print(f"[{s}] 5m SIGNAL: {sig['signal']}")
 
+                # 15m signal (long-term, overrides 5m)
                 if completed_15m is not None:
                     o2, h2, l2, c2 = completed_15m
                     sig2 = strategy.update_candle(s, o2, h2, l2, c2, ts, tf_minutes=15)
-                    if sig2 is not None:
-                        sig = sig2
+                    if sig2:
+                        sig = {k: v for k in sig2 if k != "symbol"}
+                        print(f"[{s}] 15m SIGNAL: {sig['signal']}")
 
                 # Entry handling
-                if sig and sig["signal"] in ("short_entry", "long_entry"):
+                if sig and sig.get("signal") in ("short_entry", "long_entry"):
                     st = strategy.state[s]
                     if st["position"] is not None:
-                        continue  # already in a trade for this symbol
+                        continue  # already in trade
 
                     entry = sig["entry"]
                     sl = sig["sl"]
@@ -155,9 +172,7 @@ def main():
                     if risk <= 0:
                         continue
                     risk_amount = trader.cash * risk_per_trade
-                    qty = int(risk_amount / risk)
-                    if qty <= 0:
-                        continue
+                    qty = max(1, int(risk_amount / risk))
 
                     if side_new == "long":
                         ok, ex_price = trader.buy_market(s, qty, entry)
@@ -174,12 +189,12 @@ def main():
                             "trade_id": trade_id,
                         }
                         text = (
-                            f"[RT ENTRY] {s} #{trade_id}\n"
+                            f"📈 [RT ENTRY] {s} #{trade_id}\n"
                             f"Side: {side_new.upper()}\n"
                             f"Qty: {qty}\n"
-                            f"Entry: {ex_price:.2f}\n"
-                            f"SL: {sl:.2f}\n"
-                            f"TP: {tp:.2f}"
+                            f"Entry: ₹{ex_price:,.1f}\n"
+                            f"SL: ₹{sl:,.1f}\n"
+                            f"TP: ₹{tp:,.1f}"
                         )
                         entry_msg_ids = {}
                         if notifier:
@@ -193,9 +208,10 @@ def main():
                             "entry_msg_ids": entry_msg_ids,
                         }
 
-                # Exit handling with current price
+                # Exit handling
                 exit_sig = strategy.exit_signal(s, price)
-                if exit_sig:
+                if exit_sig and exit_sig.get("signal"):
+                    exit_sig = {k: v for k in exit_sig if k != "symbol"}
                     side = exit_sig["side"]
                     exit_price = exit_sig["exit_price"]
                     trade_id = exit_sig["trade_id"]
@@ -216,13 +232,10 @@ def main():
                         equity_now = trader.equity(market_prices)
 
                         text = (
-                            f"[RT EXIT] {s} #{trade_id} {exit_sig['signal'].upper()}\n"
-                            f"Side: {side.upper()}\n"
-                            f"Qty: {qty}\n"
-                            f"Entry: {entry_price:.2f}\n"
-                            f"Exit: {actual_exit:.2f}\n"
-                            f"Trade P&L: {pnl_trade:.2f}\n"
-                            f"Equity: {equity_now:.2f}"
+                            f"📉 [RT EXIT] {s} #{trade_id} {exit_sig['signal'].upper()}\n"
+                            f"Entry: ₹{entry_price:,.1f} → Exit: ₹{actual_exit:,.1f}\n"
+                            f"Qty: {qty} | P&L: ₹{pnl_trade:,.0f}\n"
+                            f"💰 Total Equity: ₹{equity_now:,.0f}"
                         )
                         reply_id = None
                         if info["entry_msg_ids"]:
@@ -231,48 +244,39 @@ def main():
                             notifier.send(text, reply_to_message_id=reply_id)
                         del open_trades[(s, trade_id)]
 
-            now = time.time()
-            if now - last_ltp_ping >= ltp_ping_interval:
-                local_t = time.localtime(now)
-                current_minutes = local_t.tm_hour * 60 + local_t.tm_min
-                start_minutes = 8 * 60 + 55
-                end_minutes = 16 * 60 + 5
-
-                if start_minutes <= current_minutes <= end_minutes:
-                    nifty_ltp = market_prices.get("NIFTY")
-                    banknifty_ltp = market_prices.get("BANKNIFTY")
-
-                    lines = ["SPOT LTP UPDATE (every 5 min)"]
-                    if nifty_ltp is not None:
-                        lines.append(f"NIFTY: {nifty_ltp:.2f}")
-                    if banknifty_ltp is not None:
-                        lines.append(f"BANKNIFTY: {banknifty_ltp:.2f}")
-
-                    msg = "\n".join(lines)
-                    print(msg)
-                    if notifier:
-                        notifier.send(msg)
-
-                last_ltp_ping = now
+            # LTP ping every 10min for ALL symbols (9:00-16:00)
+            now_ts = time.time()
+            if now_ts - last_ltp_ping >= ltp_ping_interval:
+                current_time = now.time()
+                if datetime.strptime("09:00", "%H:%M").time() <= current_time <= datetime.strptime("16:00", "%H:%M").time():
+                    lines = ["🕐 LTP UPDATE (all symbols)"]
+                    valid_prices = 0
+                    for s, price in market_prices.items():
+                        if price:
+                            lines.append(f"{s}: ₹{price:,.1f}")
+                            valid_prices += 1
+                    if valid_prices > 0:
+                        if notifier:
+                            notifier.send("\n".join(lines))
+                        print("LTP ping sent:", lines)
+                last_ltp_ping = now_ts
 
             time.sleep(interval)
 
     except KeyboardInterrupt:
-        print("Stopped by user. Trades:")
-        for t in trader.trade_log:
-            print(t)
+        equity = trader.equity(market_prices)
+        print("Stopped by user. Final Equity:", equity)
         if notifier:
-            notifier.send("BOT STOPPED ⛔ (KeyboardInterrupt)")
-
+            notifier.send(f"🛑 RT BOT STOPPED | Final Equity: ₹{equity:,.0f}")
     except Exception as e:
         print(f"BOT ERROR: {e}")
         if notifier:
-            notifier.send(f"BOT STOPPED ⛔ due to ERROR:\n{e}")
+            notifier.send(f"🚨 RT BOT CRASHED: {e}")
         raise
-
     else:
         if notifier:
-            notifier.send("BOT STOPPED ⛔ (loop ended normally)")
+            equity = trader.equity(market_prices)
+            notifier.send(f"🛑 RT BOT STOPPED | Final Equity: ₹{equity:,.0f}")
 
 
 if __name__ == "__main__":

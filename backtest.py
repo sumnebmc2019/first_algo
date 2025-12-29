@@ -152,12 +152,13 @@ def main():
         if current_month is None:
             current_month = dt.month
 
-        # 5m update (short logic)
+        # 5m update (short logic) - DEBUG
         sig_5 = strat.update_candle(s, o, h, l, c, dt.timestamp(), tf_minutes=5)
         if sig_5:
             sig_5 = {k: v for k, v in sig_5.items() if k != "symbol"}
+            print(f"🚨 [{s}] 5m SIGNAL: {sig_5['signal']} | EMA: {strat.state[s]['ema_short']:.1f} | C: {c:.1f}")
 
-        # 15m update (long logic) if candle exists at this dt
+        # 15m update (long logic) - DEBUG
         sig_15 = None
         c15 = idx_15m[s].get(dt)
         if c15 is not None:
@@ -165,8 +166,12 @@ def main():
             sig_15 = strat.update_candle(s, o2, h2, l2, c2, dt.timestamp(), tf_minutes=15)
             if sig_15:
                 sig_15 = {k: v for k, v in sig_15.items() if k != "symbol"}
+                print(f"🚨 [{s}] 15m SIGNAL: {sig_15['signal']} | EMA: {strat.state[s]['ema_long']:.1f} | C: {c2:.1f}")
 
         signal = sig_15 or sig_5
+        if signal:
+            print(f"🎯 [{s}] FINAL SIGNAL: {signal['signal']} | Entry:{signal['entry']:.1f}")
+
         st = strat.state[s]
         trader = traders[s]
 

@@ -241,7 +241,7 @@ def main():
         # Handle exits (SL/TP) using current price
         exit_sig = strat.exit_signal(s, c)
         if exit_sig and exit_sig.get("signal"):
-            exit_sig = {k: v for k in exit_sig if k != "symbol"}
+            exit_sig = {k: v for k, v in exit_sig.items() if k != "symbol"}
             side = exit_sig["side"]
             exit_price = exit_sig["exit_price"]
             trade_id = exit_sig["trade_id"]

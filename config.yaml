@@ -100,9 +100,4 @@ backtest:
   data_dir: "data"          # where CSVs are stored
   base_year: 2018           # first year with reliable data
   months_to_run: 4          # 4 months per 6:00–12:00 session
-  
-  # legacy timing values from old config; logic moved into backtest.py
-  start_hour: 6
-  start_minute: 0
-  end_hour: 12
-  end_minute: 0
+

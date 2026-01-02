@@ -107,7 +107,6 @@ class PaperTrader:
         else:
             pnl = (entry_price - exit_price) * qty
         self.realized_pnl[symbol] = self.realized_pnl.get(symbol, 0.0) + pnl
-        self.cash += pnl
         return pnl
 
     def mark_to_market(self, market_prices: dict[str, float]) -> float:
